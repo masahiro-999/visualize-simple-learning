@@ -1,0 +1,120 @@
+# Learning nonlinear data
+
+```elixir
+Mix.install(
+  [
+    {:nx, "~> 0.3.0"},
+    {:exla, "~> 0.3.0"},
+    {:kino_vega_lite, "~> 0.1.3"},
+    {:axon, "~> 0.2"}
+  ],
+  config: [
+    nx: [
+      default_backend: EXLA.Backend,
+      default_defn_options: [compiler: EXLA]
+    ]
+  ],
+  system_env: [
+    XLA_TARGET: "cpu"
+  ]
+)
+```
+
+## Section
+
+```elixir
+model =
+  Axon.input("x", shape: {nil, 1})
+  |> Axon.dense(10)
+  |> Axon.sigmoid()
+  |> Axon.dense(1)
+
+batch = fn ->
+  xx = for _ <- 1..100, do: :rand.uniform()
+
+  x =
+    xx
+    |> Nx.tensor()
+    |> Nx.new_axis(0)
+    |> Nx.transpose()
+
+  y =
+    xx
+    |> Nx.tensor()
+    |> Nx.multiply(3.141592 * 2)
+    |> Nx.sin()
+    |> Nx.add(Nx.tensor(for _ <- 1..100, do: :rand.uniform()) |> Nx.multiply(0.2))
+    |> Nx.new_axis(0)
+    |> Nx.transpose()
+
+  {x, y}
+end
+```
+
+```elixir
+alias VegaLite, as: Vl
+
+vl_widget =
+  Vl.new(width: 400, height: 400)
+  |> VegaLite.layers([
+    VegaLite.new()
+    |> VegaLite.mark(:point, tooltip: true)
+    |> VegaLite.encode_field(:x, "x1", type: :quantitative)
+    |> VegaLite.encode_field(:y, "y1", type: :quantitative),
+    VegaLite.new()
+    |> VegaLite.mark(:line)
+    |> VegaLite.encode_field(:x, "x2", type: :quantitative)
+    |> VegaLite.encode_field(:y, "y2", type: :quantitative)
+  ])
+  |> Kino.VegaLite.new()
+  |> Kino.render()
+
+view_model = fn model, data, model_state ->
+  {x1_tensor, y1_tensor} = data
+  x1 = Nx.to_flat_list(x1_tensor)
+  y1 = Nx.to_flat_list(y1_tensor)
+
+  xx = for i <- 1..100, do: i / 100
+
+  x2_tensor =
+    xx
+    |> Nx.tensor()
+    |> Nx.new_axis(0)
+    |> Nx.transpose()
+
+  y2_tensor = Axon.predict(model, model_state, %{"x" => x2_tensor})
+
+  x2 = Nx.to_flat_list(x2_tensor)
+  y2 = Nx.to_flat_list(y2_tensor)
+
+  points =
+    Enum.zip([x1, y1, x2, y2])
+    |> Enum.map(fn {x1, y1, x2, y2} -> %{x1: x1, y1: y1, x2: x2, y2: y2} end)
+
+  Kino.VegaLite.clear(vl_widget)
+  Kino.VegaLite.push_many(vl_widget, points)
+end
+```
+
+Learning speed can be adjusted by lr
+
+```elixir
+input_data_100 = batch.()
+
+data = Stream.repeatedly(fn -> input_data_100 end)
+
+lr = 0.0001
+
+update = fn model, data, model_state ->
+  model
+  |> Axon.Loop.trainer(:mean_squared_error, Axon.Optimizers.adam(lr))
+  |> Axon.Loop.run(data, model_state, epochs: 1, iterations: 100)
+end
+
+1..1000
+|> Enum.reduce(%{}, fn _, model_state ->
+  model_state = update.(model, data, model_state)
+  view_model.(model, input_data_100, model_state)
+  model_state
+end)
+```
